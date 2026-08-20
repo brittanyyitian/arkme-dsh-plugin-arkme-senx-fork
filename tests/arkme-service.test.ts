@@ -3763,7 +3763,11 @@ describe('ArkmeService', () => {
     })
     expect(page.items[0]?.contentBlocks).toHaveLength(2)
     const mediaRef = page.items[0]?.contentBlocks?.[0]?.mediaRef ?? ''
+    const audioMediaRef = page.items[0]?.contentBlocks?.[1]?.mediaRef ?? ''
     expect(mediaRef).toMatch(/^arkme-media-v1\./)
+    const repeatedPage = await service.readSource(sourceRef)
+    expect(repeatedPage.items[0]?.contentBlocks?.[0]?.mediaRef).toBe(mediaRef)
+    expect(repeatedPage.items[0]?.contentBlocks?.[1]?.mediaRef).not.toBe(audioMediaRef)
     expect(JSON.stringify(page)).not.toContain('x-oss-signature=secret')
     expect(JSON.stringify(page)).not.toContain('jotmo_mobile_background_sound')
     expect(JSON.stringify(page)).not.toContain('asset-background')

@@ -203,6 +203,7 @@ interface ArkmeMediaDescriptor {
   fileName: string
   size: number
   expiresAtMillis: number
+  stableKey?: string
 }
 
 interface ArkmePreparedUpload {
@@ -1020,6 +1021,7 @@ export class ArkmeService {
   private readonly aiPolishRetries = new Map<string, ArkmePendingAiPolishRetry>()
   private readonly interwovenMomentReferences = new Map<string, ArkmeInterwovenMomentReference>()
   private readonly mediaRefs = new Map<string, ArkmeMediaDescriptor>()
+  private readonly stableMediaRefs = new Map<string, string>()
 
   constructor(
     private readonly config: ArkmeServiceConfig,
@@ -1520,6 +1522,7 @@ export class ArkmeService {
     this.mediaRefs.clear()
     this.worldImageRefs.clear()
     this.worldRecordRefs.clear()
+    this.stableMediaRefs.clear()
   }
 
   requestStats(): Record<string, ArkmeRequestStats> {
@@ -4422,6 +4425,7 @@ export class ArkmeService {
     const descriptor = this.mediaRefs.get(mediaRef)
     if (descriptor === undefined || descriptor.viewerUserId !== session.userId || descriptor.expiresAtMillis <= Date.now()) {
       this.mediaRefs.delete(mediaRef)
+      if (descriptor?.stableKey !== undefined) this.stableMediaRefs.delete(descriptor.stableKey)
       throw new ArkmePluginError('media-ref-invalid', '媒体引用已失效，请刷新对话后重试', false, 404)
     }
     const url = new URL(descriptor.remoteUrl)
@@ -5980,6 +5984,7 @@ export class ArkmeService {
     this.mediaRefs.clear()
     this.worldImageRefs.clear()
     this.worldRecordRefs.clear()
+    this.stableMediaRefs.clear()
     return { status: 'logged-out', environment: this.config.environment }
   }
 
@@ -6184,7 +6189,7 @@ export class ArkmeService {
             mimeType: mimeType || 'application/octet-stream',
             fileName,
             size: Math.max(0, Math.trunc(asset.size ?? 0)),
-          }),
+          }, asset.fileAssetUid),
           recordUid: record.recordUid,
           sendAtMillis: record.sendAtMillis,
           fileName,
@@ -6948,19 +6953,32 @@ export class ArkmeService {
 
   private issueMediaRef(
     viewerUserId: number,
-    descriptor: Omit<ArkmeMediaDescriptor, 'viewerUserId' | 'expiresAtMillis'>,
+    descriptor: Omit<ArkmeMediaDescriptor, 'viewerUserId' | 'expiresAtMillis' | 'stableKey'>,
+    stableIdentity?: string,
   ): string {
     const now = Date.now()
     for (const [key, value] of this.mediaRefs) {
-      if (value.expiresAtMillis <= now) this.mediaRefs.delete(key)
+      if (value.expiresAtMillis <= now) {
+        this.mediaRefs.delete(key)
+        if (value.stableKey !== undefined) this.stableMediaRefs.delete(value.stableKey)
+      }
     }
     while (this.mediaRefs.size >= 2_000) {
       const oldest = this.mediaRefs.keys().next().value as string | undefined
       if (oldest === undefined) break
+      const oldestDescriptor = this.mediaRefs.get(oldest)
       this.mediaRefs.delete(oldest)
+      if (oldestDescriptor?.stableKey !== undefined) this.stableMediaRefs.delete(oldestDescriptor.stableKey)
     }
-    const ref = `arkme-media-v1.${randomUUID()}`
-    this.mediaRefs.set(ref, { ...descriptor, viewerUserId, expiresAtMillis: now + 30 * 60_000 })
+    const stableKey = stableIdentity === undefined
+      ? undefined
+      : createHash('sha256').update(`${String(viewerUserId)}\0${stableIdentity}`).digest('base64url')
+    const cachedRef = stableKey === undefined ? undefined : this.stableMediaRefs.get(stableKey)
+    const ref = cachedRef ?? `arkme-media-v1.${randomUUID()}`
+    this.mediaRefs.delete(ref)
+    const lifetimeMillis = stableKey === undefined ? 30 * 60_000 : 24 * 60 * 60_000
+    this.mediaRefs.set(ref, { ...descriptor, viewerUserId, expiresAtMillis: now + lifetimeMillis, ...(stableKey === undefined ? {} : { stableKey }) })
+    if (stableKey !== undefined) this.stableMediaRefs.set(stableKey, ref)
     return ref
   }
 
@@ -7003,7 +7021,7 @@ export class ArkmeService {
         kind,
         mediaRef: this.issueMediaRef(viewerUserId, {
           remoteUrl, mimeType, fileName, size: Math.max(0, Math.trunc(numberValue(item.size))),
-        }),
+        }, kind === 'image' && fileAssetUid !== '' ? fileAssetUid : undefined),
         ...(fileAssetUid === '' ? {} : { fileAssetUid }),
         fileName,
         mimeType,
